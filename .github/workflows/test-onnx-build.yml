@@ -83,16 +83,48 @@ jobs:
           echo "✅ C++ header created: $(ls -lh model_ort.h | awk '{print $5}')"
         fi
     
+    - name: Check build script and requirements
+      run: |
+        cd ort-builder
+        echo "=== Checking build script ==="
+        ls -la build-mac.sh
+        echo ""
+        echo "=== Build script contents (first 20 lines) ==="
+        head -20 build-mac.sh
+        echo ""
+        echo "=== Checking CMake ==="
+        cmake --version || echo "CMake not found"
+        echo ""
+        echo "=== Checking Xcode tools ==="
+        xcode-select -p || echo "Xcode not found"
+    
     - name: Build customized ONNX Runtime static libraries
+      timeout-minutes: 60
       run: |
         cd ort-builder
         source venv/bin/activate
         chmod +x build-mac.sh
         # Step 5 from docs: Build customized onnx runtime static libraries
         echo "=== Starting macOS build (this may take 20-30 minutes) ==="
-        timeout 45m ./build-mac.sh || echo "Build timed out or failed"
+        ./build-mac.sh
         
-        # Check build results
+        echo "=== Build completed ==="
+    
+    - name: Check build results
+      if: always()
+      run: |
+        cd ort-builder
+        echo "=== Checking build results ==="
+        
+        # Show build directory structure
+        if [ -d "build" ]; then
+          echo "Build directory contents:"
+          find build -type f -name "*.a" -exec ls -lh {} \;
+        else
+          echo "No build directory found"
+        fi
+        
+        # Check specific expected output
         if [ -f "build/Mac/libonnxruntime_static.a" ]; then
           echo "✅ macOS static library built successfully"
           echo "Library size: $(ls -lh build/Mac/libonnxruntime_static.a | awk '{print $5}')"
@@ -100,8 +132,6 @@ jobs:
           lipo -info build/Mac/libonnxruntime_static.a 2>/dev/null || echo "Could not get architecture info"
         else
           echo "❌ macOS static library build failed"
-          echo "Build directory contents:"
-          find build -type f 2>/dev/null || echo "No build directory found"
         fi
     
     - name: Upload build artifacts
