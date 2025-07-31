@@ -1,10 +1,8 @@
 name: Test ONNX Runtime Builder
-
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
-
 jobs:
   test-onnx-builder:
     runs-on: macos-latest
@@ -17,6 +15,12 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
+    
+    # NEU: Git für HTTPS konfigurieren
+    - name: Configure Git for HTTPS
+      run: |
+        git config --global url."https://github.com/".insteadOf git@github.com:
+        echo "✅ Git configured to use HTTPS instead of SSH"
     
     - name: Clone ONNX Runtime Builder
       run: |
