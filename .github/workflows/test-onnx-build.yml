@@ -16,35 +16,26 @@ jobs:
       with:
         python-version: '3.11'
     
-    - name: Clone ONNX Runtime Builder
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Clone and Fix ORT Builder
       run: |
-        # Git mit Token konfigurieren für alle GitHub-URLs
-        git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
-        git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "git@github.com:"
+        # Richtiges Repository klonen
+        git clone https://github.com/olilarkin/ort-builder.git ort-builder
         
-        echo "✅ Git configured with GitHub token"
+        # Deine bewährte Submodule-Fix-Methode
+        echo "1. Fixing Git submodule to use HTTPS..."
+        cd ort-builder
+        git submodule deinit onnxruntime 2>/dev/null || true
+        sed -i '' 's/git@github.com:/https:\/\/github.com\//' .gitmodules
         
-        # Repository klonen
-        git clone https://github.com/olilarkin/onnxruntime-static-lib-builder.git onnxruntime-builder
-        cd onnxruntime-builder
+        echo "2. Initializing submodule..."
+        git submodule update --init
         
-        # .gitmodules SSH-URLs zu HTTPS konvertieren falls vorhanden
-        if [ -f ".gitmodules" ]; then
-          echo "Converting .gitmodules SSH URLs to HTTPS..."
-          sed -i '' 's/git@github.com:/https:\/\/github.com\//' .gitmodules
-          cat .gitmodules
-        fi
-        
-        echo "=== Initializing Submodules ==="
-        git submodule update --init --recursive
         echo "=== Repository Structure ==="
         ls -la
     
     - name: Setup Python Environment
       run: |
-        cd onnxruntime-builder
+        cd ort-builder
         python3 -m venv venv
         source venv/bin/activate
         pip install -r requirements.txt
@@ -52,7 +43,7 @@ jobs:
     
     - name: Setup Test Model
       run: |
-        cd onnxruntime-builder
+        cd ort-builder
         if [ -f "../best.onnx" ]; then
           cp ../best.onnx ./
           echo "✅ Using provided best.onnx"
@@ -64,7 +55,7 @@ jobs:
     
     - name: Test Model to ORT Conversion
       run: |
-        cd onnxruntime-builder
+        cd ort-builder
         source venv/bin/activate
         chmod +x convert-model-to-ort.sh
         ./convert-model-to-ort.sh best.onnx
@@ -81,7 +72,7 @@ jobs:
     
     - name: Test macOS ARM64 Build
       run: |
-        cd onnxruntime-builder
+        cd ort-builder
         source venv/bin/activate
         chmod +x build-mac.sh
         echo "=== Starting Build (20-30 minutes) ==="
@@ -100,17 +91,17 @@ jobs:
       with:
         name: onnx-runtime-test-results-${{ github.run_number }}
         path: |
-          onnxruntime-builder/build/Mac/*.a
-          onnxruntime-builder/*.ort
-          onnxruntime-builder/*.cpp
-          onnxruntime-builder/*.h
-          onnxruntime-builder/*.config
+          ort-builder/build/Mac/*.a
+          ort-builder/*.ort
+          ort-builder/*.cpp
+          ort-builder/*.h
+          ort-builder/*.config
         retention-days: 7
     
     - name: Build Summary
       if: always()
       run: |
-        cd onnxruntime-builder
+        cd ort-builder
         echo "=== Final Summary ==="
         ls -la *.ort *.cpp *.h *.config 2>/dev/null || echo "No conversion files"
         find build -name "*.a" -exec ls -lh {} \; 2>/dev/null || echo "No build artifacts"
