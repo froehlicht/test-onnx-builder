@@ -1,107 +1,112 @@
 name: Test ONNX Runtime Builder
 on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
+ push:
+   branches: [ main ]
+ workflow_dispatch:
 jobs:
-  test-onnx-builder:
-    runs-on: macos-latest
-    
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-    
-    # NEU: Git für HTTPS konfigurieren
-    - name: Configure Git for HTTPS
-      run: |
-        git config --global url."https://github.com/".insteadOf git@github.com:
-        echo "✅ Git configured to use HTTPS instead of SSH"
-    
-    - name: Clone ONNX Runtime Builder
-      run: |
-        git clone https://github.com/olilarkin/onnxruntime-static-lib-builder.git onnxruntime-builder
-        cd onnxruntime-builder
-        echo "=== Initializing Submodules ==="
-        git submodule update --init --recursive
-        echo "=== Repository Structure ==="
-        ls -la
-    
-    - name: Setup Python Environment
-      run: |
-        cd onnxruntime-builder
-        python3 -m venv venv
-        source venv/bin/activate
-        pip install -r requirements.txt
-        pip list
-    
-    - name: Setup Test Model
-      run: |
-        cd onnxruntime-builder
-        if [ -f "../best.onnx" ]; then
-          cp ../best.onnx ./
-          echo "✅ Using provided best.onnx"
-          echo "Model size: $(ls -lh best.onnx | awk '{print $5}')"
-        else
-          echo "❌ No best.onnx found"
-          exit 1
-        fi
-    
-    - name: Test Model to ORT Conversion
-      run: |
-        cd onnxruntime-builder
-        source venv/bin/activate
-        chmod +x convert-model-to-ort.sh
-        ./convert-model-to-ort.sh best.onnx
-        echo "=== Conversion Results ==="
-        ls -la *.ort *.config *.cpp *.h 2>/dev/null || echo "No output files"
-        if [ -f "best.ort" ]; then
-          echo "✅ ORT conversion successful"
-          echo "ORT file size: $(ls -lh best.ort | awk '{print $5}')"
-        fi
-        if [ -f "best_ort.cpp" ]; then
-          echo "✅ C++ embedding successful"
-          echo "C++ file size: $(ls -lh best_ort.cpp | awk '{print $5}')"
-        fi
-    
-    - name: Test macOS ARM64 Build
-      run: |
-        cd onnxruntime-builder
-        source venv/bin/activate
-        chmod +x build-mac.sh
-        echo "=== Starting Build (20-30 minutes) ==="
-        timeout 45m ./build-mac.sh || echo "Build timed out or failed"
-        if [ -f "build/Mac/libonnxruntime_static.a" ]; then
-          echo "✅ ARM64 build successful"
-          echo "Library size: $(ls -lh build/Mac/libonnxruntime_static.a | awk '{print $5}')"
-          lipo -info build/Mac/libonnxruntime_static.a
-        else
-          echo "❌ ARM64 build failed"
-        fi
-    
-    - name: Upload Test Results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: onnx-runtime-test-results-${{ github.run_number }}
-        path: |
-          onnxruntime-builder/build/Mac/*.a
-          onnxruntime-builder/*.ort
-          onnxruntime-builder/*.cpp
-          onnxruntime-builder/*.h
-          onnxruntime-builder/*.config
-        retention-days: 7
-    
-    - name: Build Summary
-      if: always()
-      run: |
-        cd onnxruntime-builder
-        echo "=== Final Summary ==="
-        ls -la *.ort *.cpp *.h *.config 2>/dev/null || echo "No conversion files"
-        find build -name "*.a" -exec ls -lh {} \; 2>/dev/null || echo "No build artifacts"
-        [ -f "best.ort" ] && echo "✅ Model conversion: SUCCESS" || echo "❌ Model conversion: FAILED"
-        [ -f "build/Mac/libonnxruntime_static.a" ] && echo "✅ ARM64 build: SUCCESS" || echo "❌ ARM64 build: FAILED"
+ test-onnx-builder:
+   runs-on: macos-latest
+   
+   steps:
+   - name: Checkout
+     uses: actions/checkout@v4
+   
+   - name: Setup Python
+     uses: actions/setup-python@v4
+     with:
+       python-version: '3.11'
+   
+   - name: Configure Git for HTTPS
+     run: |
+       git config --global url."https://github.com/".insteadOf git@github.com:
+       echo "✅ Git configured to use HTTPS instead of SSH"
+   
+   - name: Clone ONNX Runtime Builder
+     run: |
+       git clone https://github.com/olilarkin/onnxruntime-static-lib-builder.git onnxruntime-builder
+       cd onnxruntime-builder
+       
+       # Sicherheitshalber .gitmodules auch konvertieren
+       if [ -f ".gitmodules" ]; then
+         sed -i '' 's/git@github.com:/https:\/\/github.com\//' .gitmodules
+       fi
+       
+       echo "=== Initializing Submodules ==="
+       git submodule update --init --recursive
+       echo "=== Repository Structure ==="
+       ls -la
+   
+   - name: Setup Python Environment
+     run: |
+       cd onnxruntime-builder
+       python3 -m venv venv
+       source venv/bin/activate
+       pip install -r requirements.txt
+       pip list
+   
+   - name: Setup Test Model
+     run: |
+       cd onnxruntime-builder
+       if [ -f "../best.onnx" ]; then
+         cp ../best.onnx ./
+         echo "✅ Using provided best.onnx"
+         echo "Model size: $(ls -lh best.onnx | awk '{print $5}')"
+       else
+         echo "❌ No best.onnx found"
+         exit 1
+       fi
+   
+   - name: Test Model to ORT Conversion
+     run: |
+       cd onnxruntime-builder
+       source venv/bin/activate
+       chmod +x convert-model-to-ort.sh
+       ./convert-model-to-ort.sh best.onnx
+       echo "=== Conversion Results ==="
+       ls -la *.ort *.config *.cpp *.h 2>/dev/null || echo "No output files"
+       if [ -f "best.ort" ]; then
+         echo "✅ ORT conversion successful"
+         echo "ORT file size: $(ls -lh best.ort | awk '{print $5}')"
+       fi
+       if [ -f "best_ort.cpp" ]; then
+         echo "✅ C++ embedding successful"
+         echo "C++ file size: $(ls -lh best_ort.cpp | awk '{print $5}')"
+       fi
+   
+   - name: Test macOS ARM64 Build
+     run: |
+       cd onnxruntime-builder
+       source venv/bin/activate
+       chmod +x build-mac.sh
+       echo "=== Starting Build (20-30 minutes) ==="
+       timeout 45m ./build-mac.sh || echo "Build timed out or failed"
+       if [ -f "build/Mac/libonnxruntime_static.a" ]; then
+         echo "✅ ARM64 build successful"
+         echo "Library size: $(ls -lh build/Mac/libonnxruntime_static.a | awk '{print $5}')"
+         lipo -info build/Mac/libonnxruntime_static.a
+       else
+         echo "❌ ARM64 build failed"
+       fi
+   
+   - name: Upload Test Results
+     uses: actions/upload-artifact@v4
+     if: always()
+     with:
+       name: onnx-runtime-test-results-${{ github.run_number }}
+       path: |
+         onnxruntime-builder/build/Mac/*.a
+         onnxruntime-builder/*.ort
+         onnxruntime-builder/*.cpp
+         onnxruntime-builder/*.h
+         onnxruntime-builder/*.config
+       retention-days: 7
+   
+   - name: Build Summary
+     if: always()
+     run: |
+       cd onnxruntime-builder
+       echo "=== Final Summary ==="
+       ls -la *.ort *.cpp *.h *.config 2>/dev/null || echo "No conversion files"
+       find build -name "*.a" -exec ls -lh {} \; 2>/dev/null || echo "No build artifacts"
+       [ -f "best.ort" ] && echo "✅ Model conversion: SUCCESS" || echo "❌ Model conversion: FAILED"
+       [ -f "build/Mac/libonnxruntime_static.a" ] && echo "✅ ARM64 build: SUCCESS" || echo "❌ ARM64 build: FAILED"
