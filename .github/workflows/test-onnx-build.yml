@@ -16,94 +16,122 @@ jobs:
       with:
         python-version: '3.11'
     
-    - name: Clone and Fix ORT Builder
+    - name: Clone ORT Builder
       run: |
-        # Richtiges Repository klonen
         git clone https://github.com/olilarkin/ort-builder.git ort-builder
-        
-        # Deine bewährte Submodule-Fix-Methode
-        echo "1. Fixing Git submodule to use HTTPS..."
         cd ort-builder
-        git submodule deinit onnxruntime 2>/dev/null || true
-        sed -i '' 's/git@github.com:/https:\/\/github.com\//' .gitmodules
-        
-        echo "2. Initializing submodule..."
-        git submodule update --init
-        
         echo "=== Repository Structure ==="
         ls -la
     
-    - name: Setup Python Environment
+    - name: Checkout ONNX Runtime submodule
       run: |
         cd ort-builder
+        # Fix SSH to HTTPS for submodules
+        if [ -f ".gitmodules" ]; then
+          sed -i '' 's/git@github.com:/https:\/\/github.com\//' .gitmodules
+        fi
+        # Step 1 from docs: Checkout ONNX Runtime submodule
+        git submodule update --init
+        echo "✅ ONNX Runtime submodule checked out"
+    
+    - name: Create virtual environment and install dependencies
+      run: |
+        cd ort-builder
+        # Step 2 from docs: Create a virtual environment and activate it (mac/linux)
         python3 -m venv venv
         source venv/bin/activate
+        # Step 3 from docs: Install dependencies
         pip install -r requirements.txt
         pip list
+        echo "✅ Virtual environment and dependencies ready"
     
-    - name: Setup Test Model
+    - name: Setup model
       run: |
         cd ort-builder
         if [ -f "../best.onnx" ]; then
-          cp ../best.onnx ./
-          echo "✅ Using provided best.onnx"
-          echo "Model size: $(ls -lh best.onnx | awk '{print $5}')"
+          cp ../best.onnx ./model.onnx
+          echo "✅ Model copied: model.onnx"
+          echo "Model size: $(ls -lh model.onnx | awk '{print $5}')"
         else
-          echo "❌ No best.onnx found"
+          echo "❌ No best.onnx found in parent directory"
+          ls -la ../
           exit 1
         fi
     
-    - name: Test Model to ORT Conversion
+    - name: Convert model to ORT format
       run: |
         cd ort-builder
         source venv/bin/activate
         chmod +x convert-model-to-ort.sh
-        ./convert-model-to-ort.sh best.onnx
+        # Step 4 from docs: Run ./convert-model-to-ort.sh model.onnx
+        ./convert-model-to-ort.sh model.onnx
+        
         echo "=== Conversion Results ==="
-        ls -la *.ort *.config *.cpp *.h 2>/dev/null || echo "No output files"
-        if [ -f "best.ort" ]; then
-          echo "✅ ORT conversion successful"
-          echo "ORT file size: $(ls -lh best.ort | awk '{print $5}')"
+        ls -la model.* 2>/dev/null || echo "No model files found"
+        
+        # Check expected outputs from docs
+        if [ -f "model.ort" ]; then
+          echo "✅ .ort file created: $(ls -lh model.ort | awk '{print $5}')"
         fi
-        if [ -f "best_ort.cpp" ]; then
-          echo "✅ C++ embedding successful"
-          echo "C++ file size: $(ls -lh best_ort.cpp | awk '{print $5}')"
+        if [ -f "model.required_operators_and_types.config" ]; then
+          echo "✅ .config file created: $(ls -lh model.required_operators_and_types.config | awk '{print $5}')"
+        fi
+        if [ -f "model_ort.cpp" ]; then
+          echo "✅ C++ source code created: $(ls -lh model_ort.cpp | awk '{print $5}')"
+        fi
+        if [ -f "model_ort.h" ]; then
+          echo "✅ C++ header created: $(ls -lh model_ort.h | awk '{print $5}')"
         fi
     
-    - name: Test macOS ARM64 Build
+    - name: Build customized ONNX Runtime static libraries
       run: |
         cd ort-builder
         source venv/bin/activate
         chmod +x build-mac.sh
-        echo "=== Starting Build (20-30 minutes) ==="
+        # Step 5 from docs: Build customized onnx runtime static libraries
+        echo "=== Starting macOS build (this may take 20-30 minutes) ==="
         timeout 45m ./build-mac.sh || echo "Build timed out or failed"
+        
+        # Check build results
         if [ -f "build/Mac/libonnxruntime_static.a" ]; then
-          echo "✅ ARM64 build successful"
+          echo "✅ macOS static library built successfully"
           echo "Library size: $(ls -lh build/Mac/libonnxruntime_static.a | awk '{print $5}')"
-          lipo -info build/Mac/libonnxruntime_static.a
+          # Show architecture info
+          lipo -info build/Mac/libonnxruntime_static.a 2>/dev/null || echo "Could not get architecture info"
         else
-          echo "❌ ARM64 build failed"
+          echo "❌ macOS static library build failed"
+          echo "Build directory contents:"
+          find build -type f 2>/dev/null || echo "No build directory found"
         fi
     
-    - name: Upload Test Results
+    - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: onnx-runtime-test-results-${{ github.run_number }}
+        name: ort-builder-artifacts-${{ github.run_number }}
         path: |
           ort-builder/build/Mac/*.a
-          ort-builder/*.ort
-          ort-builder/*.cpp
-          ort-builder/*.h
-          ort-builder/*.config
+          ort-builder/model.ort
+          ort-builder/model.required_operators_and_types.config
+          ort-builder/model_ort.cpp
+          ort-builder/model_ort.h
         retention-days: 7
     
     - name: Build Summary
       if: always()
       run: |
         cd ort-builder
-        echo "=== Final Summary ==="
-        ls -la *.ort *.cpp *.h *.config 2>/dev/null || echo "No conversion files"
-        find build -name "*.a" -exec ls -lh {} \; 2>/dev/null || echo "No build artifacts"
-        [ -f "best.ort" ] && echo "✅ Model conversion: SUCCESS" || echo "❌ Model conversion: FAILED"
-        [ -f "build/Mac/libonnxruntime_static.a" ] && echo "✅ ARM64 build: SUCCESS" || echo "❌ ARM64 build: FAILED"
+        echo "=== ONNX Runtime Builder Test Summary ==="
+        echo ""
+        echo "📁 Model Conversion:"
+        [ -f "model.ort" ] && echo "  ✅ ORT format: SUCCESS" || echo "  ❌ ORT format: FAILED"
+        [ -f "model.required_operators_and_types.config" ] && echo "  ✅ Config file: SUCCESS" || echo "  ❌ Config file: FAILED"
+        [ -f "model_ort.cpp" ] && echo "  ✅ C++ serialization: SUCCESS" || echo "  ❌ C++ serialization: FAILED"
+        
+        echo ""
+        echo "🔨 Static Library Build:"
+        [ -f "build/Mac/libonnxruntime_static.a" ] && echo "  ✅ macOS ARM64: SUCCESS" || echo "  ❌ macOS ARM64: FAILED"
+        
+        echo ""
+        echo "📊 File Sizes:"
+        ls -lh model.* build/Mac/*.a 2>/dev/null || echo "  No files to show"
