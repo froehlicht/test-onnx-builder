@@ -1,246 +1,180 @@
-name: Test ONNX Runtime Builder
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
-jobs:
-  test-onnx-builder:
-    runs-on: macos-latest
-    
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-    
-    - name: Clone ORT Builder
-      run: |
-        git clone https://github.com/olilarkin/ort-builder.git ort-builder
-        cd ort-builder
-        echo "=== Repository Structure ==="
-        ls -la
-    
-    - name: Checkout ONNX Runtime submodule
-      run: |
-        cd ort-builder
-        # Fix SSH to HTTPS for submodules
-        if [ -f ".gitmodules" ]; then
-          sed -i '' 's/git@github.com:/https:\/\/github.com\//' .gitmodules
-        fi
-        # Step 1 from docs: Checkout ONNX Runtime submodule
-        git submodule update --init
-        echo "✅ ONNX Runtime submodule checked out"
-    
-    - name: Fix Eigen hash validation issue
-      run: |
-        cd ort-builder/onnxruntime
-        # Find and fix the Eigen hash validation issue
-        if [ -f "cmake/external/eigen.cmake" ]; then
-          echo "=== Fixing Eigen hash validation ==="
-          # Remove hash validation for Eigen
-          sed -i '' 's/URL_HASH SHA1=${DEP_SHA1_eigen}/# URL_HASH SHA1=${DEP_SHA1_eigen}/' cmake/external/eigen.cmake
-          echo "✅ Eigen hash validation disabled"
-        fi
-        
-        # Alternative: Update the hash to the current one
-        if [ -f "cmake/deps.txt" ]; then
-          echo "=== Updating Eigen hash in deps.txt ==="
-          # Replace the old hash with the current one
-          sed -i '' 's/be8be39fdbc6e60e94fa7870b280707069b5b81a/32b145f525a8308d7ab1c09388b2e288312d8eba/' cmake/deps.txt
-          echo "✅ Eigen hash updated in deps.txt"
-        fi
-    
-    - name: Create virtual environment and install dependencies
-      run: |
-        cd ort-builder
-        # Step 2 from docs: Create a virtual environment and activate it (mac/linux)
-        python3 -m venv venv
-        source venv/bin/activate
-        # Step 3 from docs: Install dependencies
-        pip install -r requirements.txt
-        pip list
-        echo "✅ Virtual environment and dependencies ready"
-    
-    - name: Setup model
-      run: |
-        cd ort-builder
-        if [ -f "../best.onnx" ]; then
-          cp ../best.onnx ./model.onnx
-          echo "✅ Model copied: model.onnx"
-          echo "Model size: $(ls -lh model.onnx | awk '{print $5}')"
-        else
-          echo "❌ No best.onnx found in parent directory"
-          ls -la ../
-          exit 1
-        fi
-    
-    - name: Convert model to ORT format
-      run: |
-        cd ort-builder
-        source venv/bin/activate
-        chmod +x convert-model-to-ort.sh
-        # Step 4 from docs: Run ./convert-model-to-ort.sh model.onnx
-        ./convert-model-to-ort.sh model.onnx
-        
-        echo "=== Conversion Results ==="
-        ls -la model.* 2>/dev/null || echo "No model files found"
-        
-        # Check expected outputs from docs
-        if [ -f "model.ort" ]; then
-          echo "✅ .ort file created: $(ls -lh model.ort | awk '{print $5}')"
-        fi
-        if [ -f "model.required_operators_and_types.config" ]; then
-          echo "✅ .config file created: $(ls -lh model.required_operators_and_types.config | awk '{print $5}')"
-        fi
-        if [ -f "model_ort.cpp" ]; then
-          echo "✅ C++ source code created: $(ls -lh model_ort.cpp | awk '{print $5}')"
-        fi
-        if [ -f "model_ort.h" ]; then
-          echo "✅ C++ header created: $(ls -lh model_ort.h | awk '{print $5}')"
-        fi
-    
-    - name: Build customized ONNX Runtime static libraries
-      timeout-minutes: 90
-      run: |
-        cd ort-builder
-        source venv/bin/activate
-        chmod +x build-mac.sh
-        # Step 5 from docs: Build customized onnx runtime static libraries
-        echo "=== Starting macOS build (this may take 45-90 minutes) ==="
-        ./build-mac.sh
-        
-        echo "=== Build completed ==="
-    
-    - name: Extract and organize build artifacts
-      run: |
-        cd ort-builder
-        echo "=== Organizing build artifacts ==="
-        
-        # Create expected directory structure
-        mkdir -p build/Mac
-        
-        # Das build-mac.sh Script erstellt folgende Dateien:
-        # 1. onnxruntime-macOS_x86_64-static-combined.a (temporär, wird gelöscht)
-        # 2. onnxruntime-macOS_arm64-static-combined.a (temporär, wird gelöscht)  
-        # 3. libs/macos-arm64_x86_64/libonnxruntime.a (finale Universal Binary)
-        
-        # Check for the final universal binary
-        if [ -f "libs/macos-arm64_x86_64/libonnxruntime.a" ]; then
-          # Copy to expected location for upload
-          cp "libs/macos-arm64_x86_64/libonnxruntime.a" "build/Mac/libonnxruntime_static.a"
-          echo "✅ Universal binary copied to build/Mac/libonnxruntime_static.a"
-          echo "Library size: $(ls -lh build/Mac/libonnxruntime_static.a | awk '{print $5}')"
-          
-          # Show architecture info
-          echo "=== Architecture Information ==="
-          lipo -info build/Mac/libonnxruntime_static.a
-          lipo -detailed_info build/Mac/libonnxruntime_static.a
-        else
-          echo "❌ Universal binary not found at libs/macos-arm64_x86_64/libonnxruntime.a"
-          
-          # Fallback: Check for individual arch builds
-          echo "=== Checking for individual architecture builds ==="
-          
-          # Check ARM64 build
-          if [ -f "onnxruntime-macOS_arm64-static-combined.a" ]; then
-            echo "✅ Found ARM64 build: onnxruntime-macOS_arm64-static-combined.a"
-            cp "onnxruntime-macOS_arm64-static-combined.a" "build/Mac/libonnxruntime_arm64_static.a"
-            echo "ARM64 Library size: $(ls -lh onnxruntime-macOS_arm64-static-combined.a | awk '{print $5}')"
-          fi
-          
-          # Check x86_64 build  
-          if [ -f "onnxruntime-macOS_x86_64-static-combined.a" ]; then
-            echo "✅ Found x86_64 build: onnxruntime-macOS_x86_64-static-combined.a"
-            cp "onnxruntime-macOS_x86_64-static-combined.a" "build/Mac/libonnxruntime_x86_64_static.a"
-            echo "x86_64 Library size: $(ls -lh onnxruntime-macOS_x86_64-static-combined.a | awk '{print $5}')"
-          fi
-          
-          # Check individual build directories
-          for arch in x86_64 arm64; do
-            build_dir="onnxruntime/build/macOS_${arch}/MinSizeRel"
-            if [ -d "$build_dir" ]; then
-              echo "=== Contents of $build_dir ==="
-              ls -la "$build_dir"/*.a 2>/dev/null || echo "No .a files in $build_dir"
-            fi
-          done
-        fi
-        
-        # Also copy the libs directory structure for reference
-        if [ -d "libs" ]; then
-          echo "=== Copying libs directory ==="
-          cp -r libs build/Mac/
-        fi
-    
-    - name: Check build results
-      if: always()
-      run: |
-        cd ort-builder
-        echo "=== Final Build Results Check ==="
-        
-        # Show build directory structure
-        if [ -d "build" ]; then
-          echo "Build directory contents:"
-          find build -type f -name "*.a" -exec ls -lh {} \;
-        else
-          echo "No build directory found"
-        fi
-        
-        # Check for expected outputs
-        if [ -f "build/Mac/libonnxruntime_static.a" ]; then
-          echo "✅ Universal static library ready"
-          echo "Final library size: $(ls -lh build/Mac/libonnxruntime_static.a | awk '{print $5}')"
-          lipo -info build/Mac/libonnxruntime_static.a
-        else
-          echo "❌ Universal static library not found"
-          
-          # Show what we do have
-          echo "=== Available static libraries ==="
-          find . -name "*.a" -type f -exec echo "Found: {}" \; -exec ls -lh {} \; 2>/dev/null
-        fi
-        
-        # Check libs directory
-        if [ -d "libs" ]; then
-          echo "=== Original libs directory structure ==="
-          find libs -type f -exec ls -lh {} \;
-        fi
-    
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: ort-builder-artifacts-${{ github.run_number }}
-        path: |
-          ort-builder/build/Mac/*.a
-          ort-builder/build/Mac/libs/**
-          ort-builder/libs/**
-          ort-builder/model.ort
-          ort-builder/model.required_operators_and_types.config
-          ort-builder/model_ort.cpp
-          ort-builder/model_ort.h
-        retention-days: 7
-    
-    - name: Build Summary
-      if: always()
-      run: |
-        cd ort-builder
-        echo "=== ONNX Runtime Builder Complete Summary ==="
-        echo ""
-        echo "📁 Model Conversion:"
-        [ -f "model.ort" ] && echo "  ✅ ORT format: SUCCESS" || echo "  ❌ ORT format: FAILED"
-        [ -f "model.required_operators_and_types.config" ] && echo "  ✅ Config file: SUCCESS" || echo "  ❌ Config file: FAILED"
-        [ -f "model_ort.cpp" ] && echo "  ✅ C++ serialization: SUCCESS" || echo "  ❌ C++ serialization: FAILED"
-        
-        echo ""
-        echo "🔨 Static Library Build:"
-        [ -f "build/Mac/libonnxruntime_static.a" ] && echo "  ✅ Universal Binary: SUCCESS" || echo "  ❌ Universal Binary: FAILED"
-        [ -f "libs/macos-arm64_x86_64/libonnxruntime.a" ] && echo "  ✅ Original Universal: SUCCESS" || echo "  ❌ Original Universal: FAILED"
-        
-        echo ""
-        echo "📊 Final File Inventory:"
-        echo "Model files:"
-        ls -lh model.* 2>/dev/null || echo "  No model files"
-        echo "Static libraries:"
-        find build libs -name "*.a" -type f -exec ls -lh {} \; 2>/dev/null || echo "  No static libraries found"
+#!/usr/bin/env bash
+set -euf -o pipefail
+ONNX_CONFIG="${1:-model.required_operators_and_types.config}"
+CMAKE_BUILD_TYPE=MinSizeRel
+
+build_arch() {
+  ONNX_CONFIG="$1"
+  ARCH="$2"
+  python onnxruntime/tools/ci_build/build.py \
+  --build_dir "onnxruntime/build/macOS_${ARCH}" \
+  --config=${CMAKE_BUILD_TYPE} \
+  --parallel \
+  --minimal_build \
+  --apple_deploy_target="10.13" \
+  --disable_ml_ops --disable_rtti \
+  --include_ops_by_config "$ONNX_CONFIG" \
+  --enable_reduced_operator_type_support \
+  --cmake_extra_defines CMAKE_OSX_ARCHITECTURES="${ARCH}" \
+  --skip_tests
+  
+  BUILD_DIR=./onnxruntime/build/macOS_${ARCH}/${CMAKE_BUILD_TYPE}
+  
+  # DEBUG: Show all available libraries
+  echo "=== Available libraries for ${ARCH} ==="
+  find "$BUILD_DIR" -name "*.a" -exec echo "Found: {}" \;
+  
+  # Check if critical libonnx.a exists and contains the symbol
+  if [ -f "${BUILD_DIR}/libonnx.a" ]; then
+    echo "✅ libonnx.a found for ${ARCH}"
+    if nm "${BUILD_DIR}/libonnx.a" | grep -q "propagateElemTypeFromInputToOutput"; then
+      echo "✅ Critical symbol found in libonnx.a for ${ARCH}"
+    else
+      echo "❌ Critical symbol NOT found in libonnx.a for ${ARCH}"
+    fi
+  else
+    echo "❌ libonnx.a NOT found for ${ARCH}!"
+  fi
+  
+  # Build the combined library with ALL necessary components
+  echo "=== Building combined library for ${ARCH} ==="
+  
+  # Core ONNX Runtime libraries (always needed)
+  CORE_LIBS=(
+    "${BUILD_DIR}/libonnxruntime_graph.a"
+    "${BUILD_DIR}/libonnxruntime_common.a" 
+    "${BUILD_DIR}/libonnxruntime_providers.a"
+    "${BUILD_DIR}/libonnxruntime_session.a"
+    "${BUILD_DIR}/libonnxruntime_flatbuffers.a"
+    "${BUILD_DIR}/libonnxruntime_framework.a"
+    "${BUILD_DIR}/libonnxruntime_util.a"
+    "${BUILD_DIR}/libonnxruntime_mlas.a"
+    "${BUILD_DIR}/libonnxruntime_optimizer.a"
+  )
+  
+  # ONNX libraries (CRITICAL - these contain the missing symbols!)
+  ONNX_LIBS=(
+    "${BUILD_DIR}/libonnx.a"
+    "${BUILD_DIR}/libonnx_proto.a"
+  )
+  
+  # Test and optional libraries
+  OPTIONAL_LIBS=(
+    "${BUILD_DIR}/libonnx_test_data_proto.a"
+    "${BUILD_DIR}/libonnx_test_runner_common.a"
+    "${BUILD_DIR}/libonnxruntime_test_utils.a"
+  )
+  
+  # Dependency libraries
+  DEPENDENCY_LIBS=(
+    "${BUILD_DIR}/_deps/re2-build/libre2.a"
+    "${BUILD_DIR}/_deps/google_nsync-build/libnsync_cpp.a"
+    "${BUILD_DIR}/_deps/protobuf-build/libprotobuf-lite.a"
+    "${BUILD_DIR}/_deps/abseil_cpp-build/absl/hash/libabsl_hash.a"
+    "${BUILD_DIR}/_deps/abseil_cpp-build/absl/hash/libabsl_city.a"
+    "${BUILD_DIR}/_deps/abseil_cpp-build/absl/hash/libabsl_low_level_hash.a"
+    "${BUILD_DIR}/_deps/abseil_cpp-build/absl/base/libabsl_throw_delegate.a"
+    "${BUILD_DIR}/_deps/abseil_cpp-build/absl/container/libabsl_raw_hash_set.a"
+    "${BUILD_DIR}/_deps/abseil_cpp-build/absl/base/libabsl_raw_logging_internal.a"
+  )
+  
+  # Collect all existing libraries
+  ALL_LIBS=()
+  
+  # Add core libraries (must exist)
+  for lib in "${CORE_LIBS[@]}"; do
+    if [ -f "$lib" ]; then
+      ALL_LIBS+=("$lib")
+      echo "✅ Added core: $(basename "$lib")"
+    else
+      echo "❌ Missing core library: $lib"
+    fi
+  done
+  
+  # Add ONNX libraries (CRITICAL!)
+  for lib in "${ONNX_LIBS[@]}"; do
+    if [ -f "$lib" ]; then
+      ALL_LIBS+=("$lib")
+      echo "✅ Added ONNX: $(basename "$lib")"
+    else
+      echo "❌ Missing ONNX library: $lib"
+    fi
+  done
+  
+  # Add optional libraries if they exist
+  for lib in "${OPTIONAL_LIBS[@]}"; do
+    if [ -f "$lib" ]; then
+      ALL_LIBS+=("$lib")
+      echo "✅ Added optional: $(basename "$lib")"
+    else
+      echo "⚠️  Optional library not found: $(basename "$lib")"
+    fi
+  done
+  
+  # Add dependency libraries if they exist
+  for lib in "${DEPENDENCY_LIBS[@]}"; do
+    if [ -f "$lib" ]; then
+      ALL_LIBS+=("$lib")
+      echo "✅ Added dependency: $(basename "$lib")"
+    else
+      echo "⚠️  Dependency library not found: $(basename "$lib")"
+    fi
+  done
+  
+  # Create the combined library
+  echo "=== Creating combined library with ${#ALL_LIBS[@]} components ==="
+  libtool -static -o "onnxruntime-macOS_${ARCH}-static-combined.a" "${ALL_LIBS[@]}"
+  
+  # Verify the combined library contains the critical symbol
+  if nm "onnxruntime-macOS_${ARCH}-static-combined.a" | grep -q "propagateElemTypeFromInputToOutput"; then
+    echo "✅ Combined library for ${ARCH} contains critical symbol!"
+  else
+    echo "❌ Combined library for ${ARCH} MISSING critical symbol!"
+    echo "Checking individual ONNX libraries:"
+    for lib in "${ONNX_LIBS[@]}"; do
+      if [ -f "$lib" ]; then
+        echo "Checking $lib:"
+        nm "$lib" | grep "propagateElemTypeFromInputToOutput" || echo "  Not found in $(basename "$lib")"
+      fi
+    done
+  fi
+}
+
+# Build both architectures
+build_arch "$ONNX_CONFIG" x86_64
+build_arch "$ONNX_CONFIG" arm64
+
+# Create universal binary
+mkdir -p libs/macos-arm64_x86_64
+echo "=== Creating Universal Binary ==="
+lipo -create onnxruntime-macOS_x86_64-static-combined.a \
+             onnxruntime-macOS_arm64-static-combined.a \
+     -output "libs/macos-arm64_x86_64/libonnxruntime.a"
+
+# Final verification
+echo "=== Final Universal Binary Verification ==="
+lipo -info "libs/macos-arm64_x86_64/libonnxruntime.a"
+
+# Test the critical symbol in the universal binary
+if nm "libs/macos-arm64_x86_64/libonnxruntime.a" | grep -q "propagateElemTypeFromInputToOutput"; then
+  echo "✅ Universal binary contains critical symbol!"
+else
+  echo "❌ Universal binary MISSING critical symbol!"
+  
+  # Test individual architectures
+  lipo -extract arm64 "libs/macos-arm64_x86_64/libonnxruntime.a" -output /tmp/test_arm64.a
+  lipo -extract x86_64 "libs/macos-arm64_x86_64/libonnxruntime.a" -output /tmp/test_x86_64.a
+  
+  echo "ARM64 arch symbol check:"
+  nm /tmp/test_arm64.a | grep "propagateElemTypeFromInputToOutput" || echo "  Not in ARM64"
+  echo "x86_64 arch symbol check:"  
+  nm /tmp/test_x86_64.a | grep "propagateElemTypeFromInputToOutput" || echo "  Not in x86_64"
+  
+  rm -f /tmp/test_arm64.a /tmp/test_x86_64.a
+fi
+
+# Clean up intermediate files
+rm onnxruntime-macOS_x86_64-static-combined.a
+rm onnxruntime-macOS_arm64-static-combined.a
+
+echo "=== Build Complete ==="
