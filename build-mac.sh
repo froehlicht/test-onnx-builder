@@ -6,6 +6,21 @@ CMAKE_BUILD_TYPE=MinSizeRel
 build_arch() {
   ONNX_CONFIG="$1"
   ARCH="$2"
+  
+  # Force cross-compilation settings for x86_64 on ARM64 host
+  if [ "$ARCH" = "x86_64" ]; then
+    echo "=== Configuring x86_64 cross-compilation on ARM64 host ==="
+    export CC="clang -arch x86_64"
+    export CXX="clang++ -arch x86_64"
+    CROSS_COMPILE_FLAGS="--cmake_extra_defines CMAKE_OSX_ARCHITECTURES=x86_64 --cmake_extra_defines CMAKE_SYSTEM_PROCESSOR=x86_64"
+  else
+    echo "=== Configuring native ARM64 compilation ==="
+    unset CC CXX
+    CROSS_COMPILE_FLAGS="--cmake_extra_defines CMAKE_OSX_ARCHITECTURES=arm64"
+  fi
+  
+  echo "Building for architecture: $ARCH"
+  
   python onnxruntime/tools/ci_build/build.py \
   --build_dir "onnxruntime/build/macOS_${ARCH}" \
   --config=${CMAKE_BUILD_TYPE} \
@@ -15,177 +30,166 @@ build_arch() {
   --disable_ml_ops --disable_rtti \
   --include_ops_by_config "$ONNX_CONFIG" \
   --enable_reduced_operator_type_support \
-  --cmake_extra_defines CMAKE_OSX_ARCHITECTURES="${ARCH}" \
+  $CROSS_COMPILE_FLAGS \
   --skip_tests
   
   BUILD_DIR=./onnxruntime/build/macOS_${ARCH}/${CMAKE_BUILD_TYPE}
   
-  # Comprehensive library discovery
-  echo "=== Comprehensive Library Discovery for ${ARCH} ==="
+  # Verify the architecture was built correctly
+  echo "=== Architecture Verification ==="
+  if [ -f "${BUILD_DIR}/libonnxruntime_common.a" ]; then
+    ACTUAL_ARCH=$(lipo -info "${BUILD_DIR}/libonnxruntime_common.a" | grep -o "arm64\|x86_64" || echo "unknown")
+    echo "Expected: $ARCH, Actual: $ACTUAL_ARCH"
+    if [ "$ACTUAL_ARCH" != "$ARCH" ]; then
+      echo "❌ ERROR: Built $ACTUAL_ARCH instead of requested $ARCH"
+      echo "This will cause lipo to fail later"
+    else
+      echo "✅ Architecture verification passed"
+    fi
+  fi
   
-  # Find ALL .a files in the build directory
-  echo "All .a files found:"
-  find "$BUILD_DIR" -name "*.a" -type f | sort
+  # Look for ONNX libraries more thoroughly
+  echo "=== ONNX Library Discovery ==="
   
-  # Look for ONNX-related files specifically
-  echo ""
-  echo "ONNX-related libraries:"
-  find "$BUILD_DIR" -name "*onnx*.a" -type f | sort
-  
-  # Look in _deps directories too
-  echo ""
-  echo "Dependencies libraries:"
-  find "$BUILD_DIR/_deps" -name "*.a" -type f 2>/dev/null | sort || echo "(No _deps directory)"
-  
-  # Check specific critical libraries
-  echo ""
-  echo "=== Critical Library Analysis ==="
-  
-  CRITICAL_LIBS=(
-    "${BUILD_DIR}/libonnx.a"
-    "${BUILD_DIR}/libonnx_proto.a"
-    "${BUILD_DIR}/_deps/onnx-build/libonnx.a"
-    "${BUILD_DIR}/_deps/onnx-build/libonnx_proto.a"
-    "${BUILD_DIR}/external/onnx/libonnx.a"
-    "${BUILD_DIR}/external/onnx/libonnx_proto.a"
+  # Check multiple possible locations for ONNX libraries
+  POSSIBLE_ONNX_LOCATIONS=(
+    "${BUILD_DIR}"
+    "${BUILD_DIR}/_deps/onnx-build"
+    "${BUILD_DIR}/external/onnx"
+    "${BUILD_DIR}/_deps/onnx-build/onnx"
+    "$(find "${BUILD_DIR}" -type d -name "*onnx*" 2>/dev/null | head -1)"
   )
   
   FOUND_ONNX_LIBS=()
   
-  for lib in "${CRITICAL_LIBS[@]}"; do
-    if [ -f "$lib" ]; then
-      echo "✅ Found: $lib"
-      FOUND_ONNX_LIBS+=("$lib")
-      
-      # Check if this library contains the critical symbol as DEFINED (not undefined)
-      if nm "$lib" 2>/dev/null | grep -E "^[0-9a-fA-F]+ [TtDd] .*propagateElemTypeFromInputToOutput"; then
-        echo "  🎯 CRITICAL: This library DEFINES propagateElemTypeFromInputToOutput!"
-      elif nm "$lib" 2>/dev/null | grep -E "^[ ]*U .*propagateElemTypeFromInputToOutput"; then
-        echo "  ⚠️  This library only REFERENCES propagateElemTypeFromInputToOutput (undefined)"
-      elif nm "$lib" 2>/dev/null | grep -q "propagateElemTypeFromInputToOutput"; then
-        echo "  ❓ This library mentions propagateElemTypeFromInputToOutput (check manually)"
-        nm "$lib" 2>/dev/null | grep "propagateElemTypeFromInputToOutput"
-      else
-        echo "  ❌ This library does NOT contain propagateElemTypeFromInputToOutput"
-      fi
-    else
-      echo "❌ Not found: $lib"
+  for location in "${POSSIBLE_ONNX_LOCATIONS[@]}"; do
+    if [ -n "$location" ] && [ -d "$location" ]; then
+      echo "Checking location: $location"
+      for lib in "$location"/libonnx*.a; do
+        if [ -f "$lib" ]; then
+          echo "✅ Found ONNX library: $lib"
+          FOUND_ONNX_LIBS+=("$lib")
+          
+          # Check if this library defines the critical symbol
+          if nm "$lib" 2>/dev/null | grep -E "^[0-9a-fA-F]+ [TtDd] .*propagateElemTypeFromInputToOutput"; then
+            echo "  🎯 This library DEFINES the critical symbol!"
+          else
+            echo "  ❌ This library does NOT define the critical symbol"
+          fi
+        fi
+      done
     fi
   done
   
-  # If we didn't find the critical ONNX libraries in standard locations, search more broadly
   if [ ${#FOUND_ONNX_LIBS[@]} -eq 0 ]; then
+    echo "❌ CRITICAL ERROR: No ONNX libraries found!"
+    echo "This means ONNX was not built or is in an unexpected location"
+    echo "Available .a files in build directory:"
+    find "$BUILD_DIR" -name "*.a" -type f | head -20
+    echo "Searching for any files containing 'onnx':"
+    find "$BUILD_DIR" -name "*onnx*" -type f | head -10
     echo ""
-    echo "=== Broad Search for ONNX Libraries ==="
-    find "$BUILD_DIR" -name "*.a" -exec sh -c 'nm "$1" 2>/dev/null | grep -q "onnx::" && echo "ONNX symbols found in: $1"' _ {} \;
+    echo "This build will likely fail to provide the required symbols"
   fi
   
-  # Now build the combined library with all available libraries
-  echo ""
-  echo "=== Building Combined Library for ${ARCH} ==="
+  # Get ALL .a files for combination
+  echo "=== Collecting All Libraries ==="
+  ALL_LIBS=($(find "$BUILD_DIR" -name "*.a" -type f | grep -v test | sort))
   
-  # Get ALL available .a files
-  ALL_AVAILABLE_LIBS=($(find "$BUILD_DIR" -name "*.a" -type f | sort))
+  echo "Found ${#ALL_LIBS[@]} libraries to combine"
   
-  echo "Found ${#ALL_AVAILABLE_LIBS[@]} total libraries"
-  
-  # Filter out test libraries and include all others
-  FILTERED_LIBS=()
-  for lib in "${ALL_AVAILABLE_LIBS[@]}"; do
-    # Skip test-only libraries but include everything else
-    if [[ "$lib" != *test* ]] || [[ "$lib" == *test_utils* ]]; then
-      FILTERED_LIBS+=("$lib")
-      echo "✅ Including: $(basename "$lib")"
-    else
-      echo "⏭️  Skipping test lib: $(basename "$lib")"
-    fi
-  done
-  
-  # Create the combined library with ALL filtered libraries
-  echo ""
-  echo "=== Creating Combined Library with ${#FILTERED_LIBS[@]} components ==="
-  
-  if [ ${#FILTERED_LIBS[@]} -gt 0 ]; then
-    libtool -static -o "onnxruntime-macOS_${ARCH}-static-combined.a" "${FILTERED_LIBS[@]}"
-    echo "✅ Combined library created successfully"
-    
-    # Verify the symbol is now properly defined
-    echo ""
-    echo "=== Final Symbol Verification ==="
-    if nm "onnxruntime-macOS_${ARCH}-static-combined.a" 2>/dev/null | grep -E "^[0-9a-fA-F]+ [TtDd] .*propagateElemTypeFromInputToOutput"; then
-      echo "🎉 SUCCESS: propagateElemTypeFromInputToOutput is DEFINED in combined library!"
-    elif nm "onnxruntime-macOS_${ARCH}-static-combined.a" 2>/dev/null | grep -E "^[ ]*U .*propagateElemTypeFromInputToOutput"; then
-      echo "❌ PROBLEM: propagateElemTypeFromInputToOutput is still UNDEFINED in combined library"
-      echo "This means the symbol definition is missing from all included libraries"
-    else
-      echo "❓ Symbol not found at all in combined library"
-    fi
-    
-    # Show some statistics
-    echo ""
-    echo "=== Library Statistics ==="
-    echo "Combined library size: $(ls -lh "onnxruntime-macOS_${ARCH}-static-combined.a" | awk '{print $5}')"
-    echo "Total symbols: $(nm "onnxruntime-macOS_${ARCH}-static-combined.a" 2>/dev/null | wc -l || echo 'unknown')"
-    echo "ONNX-related symbols: $(nm "onnxruntime-macOS_${ARCH}-static-combined.a" 2>/dev/null | grep -c "onnx" || echo '0')"
-    
-  else
+  if [ ${#ALL_LIBS[@]} -eq 0 ]; then
     echo "❌ ERROR: No libraries found to combine!"
     exit 1
   fi
+  
+  # Create combined library
+  echo "=== Creating Combined Library ==="
+  libtool -static -o "onnxruntime-macOS_${ARCH}-static-combined.a" "${ALL_LIBS[@]}"
+  
+  # Verify architecture of combined library
+  COMBINED_ARCH=$(lipo -info "onnxruntime-macOS_${ARCH}-static-combined.a" | grep -o "arm64\|x86_64" || echo "unknown")
+  echo "Combined library architecture: $COMBINED_ARCH"
+  
+  # Final symbol check
+  echo "=== Symbol Status Check ==="
+  if nm "onnxruntime-macOS_${ARCH}-static-combined.a" 2>/dev/null | grep -E "^[0-9a-fA-F]+ [TtDd] .*propagateElemTypeFromInputToOutput"; then
+    echo "🎉 SUCCESS: Critical symbol is DEFINED in $ARCH library"
+  elif nm "onnxruntime-macOS_${ARCH}-static-combined.a" 2>/dev/null | grep -E "^[ ]*U .*propagateElemTypeFromInputToOutput"; then
+    echo "❌ PROBLEM: Critical symbol is UNDEFINED in $ARCH library"
+  else
+    echo "❓ Critical symbol not found in $ARCH library"
+  fi
+  
+  echo "Library size: $(ls -lh "onnxruntime-macOS_${ARCH}-static-combined.a" | awk '{print $5}')"
 }
 
-# Build both architectures
+# Build both architectures with proper cross-compilation
+echo "=== Starting Multi-Architecture Build ==="
+
+# Build x86_64 first (cross-compile on ARM64 host)
 build_arch "$ONNX_CONFIG" x86_64
+
+# Build ARM64 (native)
 build_arch "$ONNX_CONFIG" arm64
 
-# Create universal binary only if both arch builds succeeded
-if [ -f "onnxruntime-macOS_x86_64-static-combined.a" ] && [ -f "onnxruntime-macOS_arm64-static-combined.a" ]; then
-  mkdir -p libs/macos-arm64_x86_64
-  echo "=== Creating Universal Binary ==="
-  lipo -create onnxruntime-macOS_x86_64-static-combined.a \
-               onnxruntime-macOS_arm64-static-combined.a \
-       -output "libs/macos-arm64_x86_64/libonnxruntime.a"
+# Verify we have both architecture files with different architectures
+echo "=== Pre-Universal Binary Verification ==="
 
-  # Final verification of universal binary
-  echo "=== Final Universal Binary Verification ==="
-  lipo -info "libs/macos-arm64_x86_64/libonnxruntime.a"
-  
-  # Test the critical symbol in both architectures of the universal binary
-  lipo -extract arm64 "libs/macos-arm64_x86_64/libonnxruntime.a" -output /tmp/test_arm64.a
-  lipo -extract x86_64 "libs/macos-arm64_x86_64/libonnxruntime.a" -output /tmp/test_x86_64.a
-  
-  echo ""
-  echo "ARM64 architecture symbol status:"
-  if nm /tmp/test_arm64.a 2>/dev/null | grep -E "^[0-9a-fA-F]+ [TtDd] .*propagateElemTypeFromInputToOutput"; then
-    echo "🎉 ARM64: propagateElemTypeFromInputToOutput is DEFINED"
-  elif nm /tmp/test_arm64.a 2>/dev/null | grep -E "^[ ]*U .*propagateElemTypeFromInputToOutput"; then
-    echo "❌ ARM64: propagateElemTypeFromInputToOutput is UNDEFINED"
-  else
-    echo "❓ ARM64: propagateElemTypeFromInputToOutput not found"
-  fi
-  
-  echo ""
-  echo "x86_64 architecture symbol status:"
-  if nm /tmp/test_x86_64.a 2>/dev/null | grep -E "^[0-9a-fA-F]+ [TtDd] .*propagateElemTypeFromInputToOutput"; then
-    echo "🎉 x86_64: propagateElemTypeFromInputToOutput is DEFINED"
-  elif nm /tmp/test_x86_64.a 2>/dev/null | grep -E "^[ ]*U .*propagateElemTypeFromInputToOutput"; then
-    echo "❌ x86_64: propagateElemTypeFromInputToOutput is UNDEFINED"
-  else
-    echo "❓ x86_64: propagateElemTypeFromInputToOutput not found"
-  fi
-  
-  # Clean up temp files
-  rm -f /tmp/test_arm64.a /tmp/test_x86_64.a
-  
-  # Clean up intermediate files
-  rm onnxruntime-macOS_x86_64-static-combined.a
-  rm onnxruntime-macOS_arm64-static-combined.a
-  
-  echo ""
-  echo "=== Build Complete ==="
-  echo "Universal library: libs/macos-arm64_x86_64/libonnxruntime.a"
-  echo "Library size: $(ls -lh libs/macos-arm64_x86_64/libonnxruntime.a | awk '{print $5}')"
-else
-  echo "❌ ERROR: Could not create universal binary - individual architecture builds failed"
+if [ ! -f "onnxruntime-macOS_x86_64-static-combined.a" ]; then
+  echo "❌ ERROR: x86_64 library not found"
   exit 1
 fi
+
+if [ ! -f "onnxruntime-macOS_arm64-static-combined.a" ]; then
+  echo "❌ ERROR: ARM64 library not found"
+  exit 1
+fi
+
+# Check architectures before combining
+X86_ARCH=$(lipo -info "onnxruntime-macOS_x86_64-static-combined.a" | grep -o "arm64\|x86_64" || echo "unknown")
+ARM_ARCH=$(lipo -info "onnxruntime-macOS_arm64-static-combined.a" | grep -o "arm64\|x86_64" || echo "unknown")
+
+echo "x86_64 library actual architecture: $X86_ARCH"
+echo "ARM64 library actual architecture: $ARM_ARCH"
+
+if [ "$X86_ARCH" = "$ARM_ARCH" ]; then
+  echo "❌ ERROR: Both libraries have the same architecture ($X86_ARCH)"
+  echo "Cross-compilation failed - cannot create universal binary"
+  echo "Will use single architecture instead"
+  
+  # Use the ARM64 version since that's what we're running on
+  mkdir -p libs/macos-arm64_x86_64
+  cp "onnxruntime-macOS_arm64-static-combined.a" "libs/macos-arm64_x86_64/libonnxruntime.a"
+  echo "⚠️  Created single-architecture library (ARM64 only)"
+else
+  # Create universal binary
+  mkdir -p libs/macos-arm64_x86_64
+  echo "=== Creating Universal Binary ==="
+  lipo -create "onnxruntime-macOS_x86_64-static-combined.a" \
+               "onnxruntime-macOS_arm64-static-combined.a" \
+       -output "libs/macos-arm64_x86_64/libonnxruntime.a"
+  
+  echo "✅ Universal binary created successfully"
+  lipo -info "libs/macos-arm64_x86_64/libonnxruntime.a"
+fi
+
+# Final verification
+echo "=== Final Library Verification ==="
+echo "Final library size: $(ls -lh libs/macos-arm64_x86_64/libonnxruntime.a | awk '{print $5}')"
+
+# Test final symbol status
+if nm "libs/macos-arm64_x86_64/libonnxruntime.a" 2>/dev/null | grep -E "^[0-9a-fA-F]+ [TtDd] .*propagateElemTypeFromInputToOutput"; then
+  echo "🎉 FINAL SUCCESS: Critical symbol is properly DEFINED in final library"
+elif nm "libs/macos-arm64_x86_64/libonnxruntime.a" 2>/dev/null | grep -E "^[ ]*U .*propagateElemTypeFromInputToOutput"; then
+  echo "❌ FINAL PROBLEM: Critical symbol is still UNDEFINED in final library"
+  echo "The linking error will persist"
+else
+  echo "❓ Critical symbol not found in final library"
+fi
+
+# Cleanup
+rm -f onnxruntime-macOS_x86_64-static-combined.a
+rm -f onnxruntime-macOS_arm64-static-combined.a
+
+echo "=== Build Complete ==="
