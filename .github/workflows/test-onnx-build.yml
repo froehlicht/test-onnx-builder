@@ -1,4 +1,3 @@
-
 name: Test ONNX Runtime Builder
 on:
   push:
@@ -103,17 +102,6 @@ jobs:
           echo "✅ C++ header created: $(ls -lh model_ort.h | awk '{print $5}')"
         fi
     
-    - name: Inspect build script
-      run: |
-        cd ort-builder
-        echo "=== Inspecting build-mac.sh ==="
-        if [ -f "build-mac.sh" ]; then
-          echo "Build script content:"
-          cat build-mac.sh
-        else
-          echo "❌ build-mac.sh not found"
-        fi
-    
     - name: Build customized ONNX Runtime static libraries
       timeout-minutes: 90
       run: |
@@ -126,66 +114,71 @@ jobs:
         
         echo "=== Build completed ==="
     
-    - name: Fix build directory structure
+    - name: Extract and organize build artifacts
       run: |
         cd ort-builder
-        echo "=== Searching for built static library ==="
+        echo "=== Organizing build artifacts ==="
         
-        # Search for the static library in all possible locations
-        find . -name "libonnxruntime_static.a" -type f 2>/dev/null || echo "No libonnxruntime_static.a found"
-        find . -name "*.a" -type f -path "*/build/*" 2>/dev/null || echo "No .a files found in build directories"
+        # Create expected directory structure
+        mkdir -p build/Mac
         
-        # Check common build locations
-        possible_paths=(
-          "onnxruntime/build/macOS_arm64/MinSizeRel/libonnxruntime_static.a"
-          "onnxruntime/build/macOS/MinSizeRel/libonnxruntime_static.a"
-          "onnxruntime/build/Mac/MinSizeRel/libonnxruntime_static.a"
-          "onnxruntime/build/Darwin/MinSizeRel/libonnxruntime_static.a"
-          "build/macOS_arm64/MinSizeRel/libonnxruntime_static.a"
-          "build/macOS/MinSizeRel/libonnxruntime_static.a"
-          "build/Mac/MinSizeRel/libonnxruntime_static.a"
-          "build/Darwin/MinSizeRel/libonnxruntime_static.a"
-        )
+        # Das build-mac.sh Script erstellt folgende Dateien:
+        # 1. onnxruntime-macOS_x86_64-static-combined.a (temporär, wird gelöscht)
+        # 2. onnxruntime-macOS_arm64-static-combined.a (temporär, wird gelöscht)  
+        # 3. libs/macos-arm64_x86_64/libonnxruntime.a (finale Universal Binary)
         
-        found_lib=""
-        for path in "${possible_paths[@]}"; do
-          if [ -f "$path" ]; then
-            found_lib="$path"
-            echo "✅ Found static library at: $path"
-            echo "Library size: $(ls -lh "$path" | awk '{print $5}')"
-            break
+        # Check for the final universal binary
+        if [ -f "libs/macos-arm64_x86_64/libonnxruntime.a" ]; then
+          # Copy to expected location for upload
+          cp "libs/macos-arm64_x86_64/libonnxruntime.a" "build/Mac/libonnxruntime_static.a"
+          echo "✅ Universal binary copied to build/Mac/libonnxruntime_static.a"
+          echo "Library size: $(ls -lh build/Mac/libonnxruntime_static.a | awk '{print $5}')"
+          
+          # Show architecture info
+          echo "=== Architecture Information ==="
+          lipo -info build/Mac/libonnxruntime_static.a
+          lipo -detailed_info build/Mac/libonnxruntime_static.a
+        else
+          echo "❌ Universal binary not found at libs/macos-arm64_x86_64/libonnxruntime.a"
+          
+          # Fallback: Check for individual arch builds
+          echo "=== Checking for individual architecture builds ==="
+          
+          # Check ARM64 build
+          if [ -f "onnxruntime-macOS_arm64-static-combined.a" ]; then
+            echo "✅ Found ARM64 build: onnxruntime-macOS_arm64-static-combined.a"
+            cp "onnxruntime-macOS_arm64-static-combined.a" "build/Mac/libonnxruntime_arm64_static.a"
+            echo "ARM64 Library size: $(ls -lh onnxruntime-macOS_arm64-static-combined.a | awk '{print $5}')"
           fi
-        done
-        
-        if [ -n "$found_lib" ]; then
-          # Create expected directory structure
-          mkdir -p build/Mac
-          cp "$found_lib" build/Mac/libonnxruntime_static.a
-          echo "✅ Static library copied to expected location: build/Mac/libonnxruntime_static.a"
           
-          # Also check for other potentially needed libraries
-          lib_dir=$(dirname "$found_lib")
-          echo "=== Other libraries in $lib_dir ==="
-          ls -la "$lib_dir"/*.a 2>/dev/null || echo "No other .a files found"
+          # Check x86_64 build  
+          if [ -f "onnxruntime-macOS_x86_64-static-combined.a" ]; then
+            echo "✅ Found x86_64 build: onnxruntime-macOS_x86_64-static-combined.a"
+            cp "onnxruntime-macOS_x86_64-static-combined.a" "build/Mac/libonnxruntime_x86_64_static.a"
+            echo "x86_64 Library size: $(ls -lh onnxruntime-macOS_x86_64-static-combined.a | awk '{print $5}')"
+          fi
           
-          # Copy other important libraries if they exist
-          for lib in onnxruntime_providers onnxruntime_framework onnxruntime_common onnxruntime_mlas onnxruntime_util; do
-            if [ -f "$lib_dir/lib${lib}.a" ]; then
-              cp "$lib_dir/lib${lib}.a" build/Mac/
-              echo "✅ Copied lib${lib}.a"
+          # Check individual build directories
+          for arch in x86_64 arm64; do
+            build_dir="onnxruntime/build/macOS_${arch}/MinSizeRel"
+            if [ -d "$build_dir" ]; then
+              echo "=== Contents of $build_dir ==="
+              ls -la "$build_dir"/*.a 2>/dev/null || echo "No .a files in $build_dir"
             fi
           done
-        else
-          echo "❌ Static library not found in any expected location"
-          echo "=== Full directory structure ==="
-          find . -type d -name "build" -exec echo "Directory: {}" \; -exec ls -la {} \; 2>/dev/null
+        fi
+        
+        # Also copy the libs directory structure for reference
+        if [ -d "libs" ]; then
+          echo "=== Copying libs directory ==="
+          cp -r libs build/Mac/
         fi
     
     - name: Check build results
       if: always()
       run: |
         cd ort-builder
-        echo "=== Checking build results ==="
+        echo "=== Final Build Results Check ==="
         
         # Show build directory structure
         if [ -d "build" ]; then
@@ -195,19 +188,24 @@ jobs:
           echo "No build directory found"
         fi
         
-        # Check specific expected output
+        # Check for expected outputs
         if [ -f "build/Mac/libonnxruntime_static.a" ]; then
-          echo "✅ macOS static library built successfully"
-          echo "Library size: $(ls -lh build/Mac/libonnxruntime_static.a | awk '{print $5}')"
-          # Show architecture info
-          lipo -info build/Mac/libonnxruntime_static.a 2>/dev/null || echo "Could not get architecture info"
+          echo "✅ Universal static library ready"
+          echo "Final library size: $(ls -lh build/Mac/libonnxruntime_static.a | awk '{print $5}')"
+          lipo -info build/Mac/libonnxruntime_static.a
         else
-          echo "❌ macOS static library build failed"
+          echo "❌ Universal static library not found"
+          
+          # Show what we do have
+          echo "=== Available static libraries ==="
+          find . -name "*.a" -type f -exec echo "Found: {}" \; -exec ls -lh {} \; 2>/dev/null
         fi
         
-        # Show all .a files found anywhere
-        echo "=== All .a files in project ==="
-        find . -name "*.a" -type f -exec ls -lh {} \; 2>/dev/null || echo "No .a files found anywhere"
+        # Check libs directory
+        if [ -d "libs" ]; then
+          echo "=== Original libs directory structure ==="
+          find libs -type f -exec ls -lh {} \;
+        fi
     
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
@@ -216,6 +214,8 @@ jobs:
         name: ort-builder-artifacts-${{ github.run_number }}
         path: |
           ort-builder/build/Mac/*.a
+          ort-builder/build/Mac/libs/**
+          ort-builder/libs/**
           ort-builder/model.ort
           ort-builder/model.required_operators_and_types.config
           ort-builder/model_ort.cpp
@@ -226,7 +226,7 @@ jobs:
       if: always()
       run: |
         cd ort-builder
-        echo "=== ONNX Runtime Builder Test Summary ==="
+        echo "=== ONNX Runtime Builder Complete Summary ==="
         echo ""
         echo "📁 Model Conversion:"
         [ -f "model.ort" ] && echo "  ✅ ORT format: SUCCESS" || echo "  ❌ ORT format: FAILED"
@@ -235,8 +235,12 @@ jobs:
         
         echo ""
         echo "🔨 Static Library Build:"
-        [ -f "build/Mac/libonnxruntime_static.a" ] && echo "  ✅ macOS ARM64: SUCCESS" || echo "  ❌ macOS ARM64: FAILED"
+        [ -f "build/Mac/libonnxruntime_static.a" ] && echo "  ✅ Universal Binary: SUCCESS" || echo "  ❌ Universal Binary: FAILED"
+        [ -f "libs/macos-arm64_x86_64/libonnxruntime.a" ] && echo "  ✅ Original Universal: SUCCESS" || echo "  ❌ Original Universal: FAILED"
         
         echo ""
-        echo "📊 File Sizes:"
-        ls -lh model.* build/Mac/*.a 2>/dev/null || echo "  No files to show"
+        echo "📊 Final File Inventory:"
+        echo "Model files:"
+        ls -lh model.* 2>/dev/null || echo "  No model files"
+        echo "Static libraries:"
+        find build libs -name "*.a" -type f -exec ls -lh {} \; 2>/dev/null || echo "  No static libraries found"
